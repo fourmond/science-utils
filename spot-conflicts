@@ -1,0 +1,161 @@
+#!/usr/bin/perl -w
+
+# spot-conflicts: goes through a list of authors and a list of
+# reviewers, and list the reviewers that have authored articles with
+# some of the authors.
+
+# Copyright 2012, 2017 by Vincent Fourmond
+
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301
+# USA
+
+use Encode;
+use LWP;
+
+# For escaping DOI for requests !
+use URI::Escape;
+
+use Getopt::Long qw(:config  bundling);
+
+# Version 6
+
+
+my $ua = LWP::UserAgent->new;
+# Use cookies...
+$ua->cookie_jar({});
+
+my @first;
+my @second;
+my @all;
+
+open FIRST, shift;
+@first = <FIRST>;
+map(chomp, @first);
+close FIRST;
+
+open SECOND, shift;
+@second = <SECOND>;
+map(chomp, @second);
+close SECOND;
+
+push(@all, @first);
+push(@all, @second);
+
+my %first_names;
+for my $n(@first) {
+    $first_names{$n} = 1;
+}
+
+my %second_names;
+for my $n(@second) {
+    $second_names{$n} = 1;
+}
+
+my %p_by_name;
+my %p_by_id;
+my %p_by_id_first;
+my %p_by_id_second;
+
+my %simplified_names;
+
+
+for my $n(@all) {
+    next if $n =~ /^\s*$/;
+    my $lst = &get_ids_for_name($n);
+    # print join(", ", @{$lst})."\n";
+    $p_by_name{$n} = $lst;
+    for my $id (@{$lst}) {
+        $p_by_id{$id} ||= [];
+        $p_by_id_first{$id} ||= [];
+        $p_by_id_second{$id} ||= [];
+        push @{$p_by_id{$id}}, $n;
+        if($first_names{$n}) {
+            push @{$p_by_id_first{$id}}, $n;
+        }
+        else {
+            push @{$p_by_id_second{$id}}, $n;
+        }
+    }
+}
+
+# Now walking over the whole publication by id list and finding collisions.
+
+# print Data::Dumper::Dump(\%p_by_id);
+
+for my $n (@second) {
+
+    print "\nDealing with $n:\n";
+    my $found = 0;
+    my %clashes;
+    for my $id (@{$p_by_name{$n}}) {
+        if($p_by_id_first{$id} && (@{$p_by_id_first{$id}} > 0)) {
+            $found += 1;
+            print " -> article id ".$id." clashes with: ".
+                join(", ", @{$p_by_id_first{$id}}) . "\n" .
+                " -> see more at http://www.ncbi.nlm.nih.gov/pubmed/".$id."\n";
+            for my $a(@{$p_by_id_first{$id}}) {
+                $clashes{$a} = 1;
+            }
+        }
+    }
+    my $nb = keys %clashes;
+    print "Found ".$nb." potential clashes\n";
+
+    for my $nn (keys %clashes) {
+        print " - ".$nn." (abbreviated as ".$simplified_names{$nn}.")\n";
+    }
+}
+
+
+sub get_ids_for_name() {
+    my $name = shift;
+    my $on = $name;
+
+    # # We only keep the last name...
+
+    my @lst = split(/\s+/, $name);
+    $name = $lst[0];
+    $simplified_names{$on} = $name;
+
+    # We don't simplify much anymore...
+    print "Symplifying $on to $name\n";
+    
+    # print "Fetching publications for $name\n";
+    my $l =  &get_pmid(['db' => 'pubmed', 'term' => "$name"."[Author]", 
+                        'retmax' => '100000' ]);
+    print " -> found ".(@{$l})." publications\n";
+    return $l;
+}
+
+
+sub get_pmid() {
+    my $request = shift;
+
+    my $uri = URI->new('http://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi');
+    $uri->query_form($request);
+
+    my $res = $ua->get($uri);
+    if($res->is_success) {
+        my $str = $res->content;
+        # Q&D XML parsing
+
+        my $lst = [];
+        while($str =~ /Id>(\d+)</g) {
+            push @{$lst}, $1;
+        }
+        return $lst;
+    }
+    return [];
+}
